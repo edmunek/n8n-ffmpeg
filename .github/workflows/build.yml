@@ -25,16 +25,32 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Odczytaj wersje bazowe
+       - name: Odczytaj wersje bazowe
         id: v
         run: |
+          set -uo pipefail
           docker pull -q docker.n8n.io/n8nio/n8n:latest
+
           VERSION=$(docker run --rm docker.n8n.io/n8nio/n8n:latest n8n --version)
-          ALPINE=$(docker run --rm --entrypoint cat \
-                   docker.n8n.io/n8nio/n8n:latest /etc/alpine-release | cut -d. -f1,2)
+          if [ -z "$VERSION" ]; then echo "BLAD: pusta wersja n8n"; exit 1; fi
+
+          echo "--- diagnostyka bazy ---"
+          docker run --rm --entrypoint sh docker.n8n.io/n8nio/n8n:latest \
+            -c 'cat /etc/os-release 2>&1 | head -3; echo "alpine-release:"; cat /etc/alpine-release 2>&1' || true
+          echo "--- koniec diagnostyki ---"
+
+          RAW=$(docker run --rm --entrypoint sh docker.n8n.io/n8nio/n8n:latest \
+                -c 'cat /etc/alpine-release' 2>/dev/null || true)
+          ALPINE=$(printf '%s' "$RAW" | tr -d '\r' | cut -d. -f1,2)
+          if [ -z "$ALPINE" ]; then
+            ALPINE=3.22
+            echo "UWAGA: nie odczytano wersji Alpine, uzywam fallbacku $ALPINE"
+          fi
+
           echo "n8n=$VERSION alpine=$ALPINE"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "alpine=$ALPINE"   >> "$GITHUB_OUTPUT"
+
           if [ "${{ github.event_name }}" = "schedule" ] \
              && docker manifest inspect "$IMG:$VERSION" >/dev/null 2>&1; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
