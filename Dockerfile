@@ -1,10 +1,11 @@
+ARG N8N_IMAGE=n8nio/n8n
 ARG N8N_VERSION=latest
 ARG ALPINE_VERSION=3.22
 
 # apk jest wyciety z obrazu n8n - pozyczamy go z czystego Alpine
 FROM alpine:${ALPINE_VERSION} AS apkdonor
 
-FROM docker.n8n.io/n8nio/n8n:${N8N_VERSION}
+FROM ${N8N_IMAGE}:${N8N_VERSION}
 
 USER root
 
