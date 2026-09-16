@@ -9,6 +9,7 @@ on:
 
 env:
   IMG: ghcr.io/edmunek/n8n-ffmpeg
+  BASE: n8nio/n8n
 
 jobs:
   build:
@@ -29,17 +30,24 @@ jobs:
         id: v
         run: |
           set -uo pipefail
-          docker pull -q docker.n8n.io/n8nio/n8n:latest
 
-          VERSION=$(docker run --rm docker.n8n.io/n8nio/n8n:latest n8n --version)
+          PULLED=0
+          for i in 1 2 3; do
+            if docker pull -q "$BASE:latest"; then PULLED=1; break; fi
+            echo "pull nieudany (proba $i) - czekam 60s"
+            sleep 60
+          done
+          if [ "$PULLED" != "1" ]; then echo "BLAD: nie udalo sie pobrac $BASE:latest"; exit 1; fi
+
+          VERSION=$(docker run --rm "$BASE:latest" n8n --version)
           if [ -z "$VERSION" ]; then echo "BLAD: pusta wersja n8n"; exit 1; fi
 
           echo "--- diagnostyka bazy ---"
-          docker run --rm --entrypoint sh docker.n8n.io/n8nio/n8n:latest \
+          docker run --rm --entrypoint sh "$BASE:latest" \
             -c 'cat /etc/os-release 2>&1 | head -3; echo "alpine-release:"; cat /etc/alpine-release 2>&1' || true
           echo "--- koniec diagnostyki ---"
 
-          RAW=$(docker run --rm --entrypoint sh docker.n8n.io/n8nio/n8n:latest \
+          RAW=$(docker run --rm --entrypoint sh "$BASE:latest" \
                 -c 'cat /etc/alpine-release' 2>/dev/null || true)
           ALPINE=$(printf '%s' "$RAW" | tr -d '\r' | cut -d. -f1,2)
           if [ -z "$ALPINE" ]; then
@@ -64,18 +72,27 @@ jobs:
 
       - name: Build
         if: steps.v.outputs.skip == 'false'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/arm64
-          load: true
-          tags: n8n-ffmpeg:test
-          build-args: |
-            N8N_VERSION=${{ steps.v.outputs.version }}
-            ALPINE_VERSION=${{ steps.v.outputs.alpine }}
-          labels: org.opencontainers.image.version=${{ steps.v.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        run: |
+          set -uo pipefail
+          OK=0
+          for i in 1 2 3 4; do
+            echo "=== Proba $i ==="
+            if docker buildx build \
+                 --platform linux/arm64 \
+                 --build-arg N8N_IMAGE="$BASE" \
+                 --build-arg N8N_VERSION=${{ steps.v.outputs.version }} \
+                 --build-arg ALPINE_VERSION=${{ steps.v.outputs.alpine }} \
+                 --label org.opencontainers.image.version=${{ steps.v.outputs.version }} \
+                 --cache-from type=gha \
+                 --cache-to type=gha,mode=max \
+                 --tag n8n-ffmpeg:test \
+                 --load . ; then
+              OK=1; break
+            fi
+            echo "Nieudana - czekam 90s przed kolejna proba"
+            sleep 90
+          done
+          if [ "$OK" != "1" ]; then echo "BLAD: build nie powiodl sie po 4 probach"; exit 1; fi
 
       - name: Smoke test
         if: steps.v.outputs.skip == 'false'
@@ -93,6 +110,7 @@ jobs:
       - name: Push
         if: steps.v.outputs.skip == 'false'
         run: |
+          set -euo pipefail
           V="${{ steps.v.outputs.version }}"
           docker tag n8n-ffmpeg:test "$IMG:$V"
           docker tag n8n-ffmpeg:test "$IMG:latest"
