@@ -2,7 +2,7 @@ name: build-n8n-ffmpeg
 
 on:
   schedule:
-    - cron: '17 3 * * *'
+    - cron: '23 */4 * * *'
   workflow_dispatch:
   push:
     paths: ['Dockerfile', '.github/workflows/build.yml']
