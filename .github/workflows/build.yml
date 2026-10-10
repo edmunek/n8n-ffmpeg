@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '23 * * * *'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Wersja n8n (puste = latest z Docker Hub)'
+        required: false
+        default: ''
   push:
     paths: ['Dockerfile', '.github/workflows/build.yml']
 
@@ -26,46 +31,72 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Odczytaj wersje bazowe
+      # Wersja z API Docker Hub - bez pullowania obrazu (nie zuzywa limitu pulli)
+      - name: Ustal wersje n8n
         id: v
         run: |
+          set -euo pipefail
+          HUB="https://hub.docker.com/v2/repositories/$BASE/tags"
+          REQ="${{ inputs.version }}"
+
+          if [ -n "$REQ" ]; then
+            VERSION="$REQ"
+            echo "Wersja podana recznie: $VERSION"
+          else
+            DIGEST=$(curl -fsS --retry 3 --retry-delay 10 "$HUB/latest" | jq -r '.digest // empty')
+            if [ -z "$DIGEST" ]; then echo "BLAD: brak digestu dla $BASE:latest"; exit 1; fi
+
+            VERSION=$(curl -fsS --retry 3 --retry-delay 10 "$HUB?page_size=100&ordering=last_updated" \
+                      | jq -r --arg d "$DIGEST" '.results[] | select(.digest == $d) | .name' \
+                      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+            if [ -z "$VERSION" ]; then echo "BLAD: nie znaleziono wersji dla digestu $DIGEST"; exit 1; fi
+            echo "Docker Hub latest = $VERSION ($DIGEST)"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "schedule" ] \
+             && docker manifest inspect "$IMG:$VERSION" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Wersja $VERSION juz zbudowana - pomijam (bez zadnego pulla z Docker Hub)."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Zalogowany pull: osobny limit konta zamiast wspolnego limitu IP runnera
+      - uses: docker/login-action@v3
+        if: steps.v.outputs.skip == 'false'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pobierz baze i odczytaj Alpine
+        id: base
+        if: steps.v.outputs.skip == 'false'
+        run: |
           set -uo pipefail
+          V="${{ steps.v.outputs.version }}"
 
           PULLED=0
           for i in 1 2 3; do
-            if docker pull -q "$BASE:latest"; then PULLED=1; break; fi
+            if docker pull -q "$BASE:$V"; then PULLED=1; break; fi
             echo "pull nieudany (proba $i) - czekam 60s"
             sleep 60
           done
-          if [ "$PULLED" != "1" ]; then echo "BLAD: nie udalo sie pobrac $BASE:latest"; exit 1; fi
+          if [ "$PULLED" != "1" ]; then echo "BLAD: nie udalo sie pobrac $BASE:$V"; exit 1; fi
 
-          VERSION=$(docker run --rm "$BASE:latest" n8n --version)
-          if [ -z "$VERSION" ]; then echo "BLAD: pusta wersja n8n"; exit 1; fi
+          REAL=$(docker run --rm "$BASE:$V" n8n --version | tr -d '\r')
+          if [ "$REAL" != "$V" ]; then echo "BLAD: obraz $BASE:$V zglasza wersje '$REAL'"; exit 1; fi
 
-          echo "--- diagnostyka bazy ---"
-          docker run --rm --entrypoint sh "$BASE:latest" \
-            -c 'cat /etc/os-release 2>&1 | head -3; echo "alpine-release:"; cat /etc/alpine-release 2>&1' || true
-          echo "--- koniec diagnostyki ---"
-
-          RAW=$(docker run --rm --entrypoint sh "$BASE:latest" \
-                -c 'cat /etc/alpine-release' 2>/dev/null || true)
+          RAW=$(docker run --rm --entrypoint sh "$BASE:$V" -c 'cat /etc/alpine-release' 2>/dev/null || true)
           ALPINE=$(printf '%s' "$RAW" | tr -d '\r' | cut -d. -f1,2)
           if [ -z "$ALPINE" ]; then
             ALPINE=3.22
             echo "UWAGA: nie odczytano wersji Alpine, uzywam fallbacku $ALPINE"
           fi
 
-          echo "n8n=$VERSION alpine=$ALPINE"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "alpine=$ALPINE"   >> "$GITHUB_OUTPUT"
-
-          if [ "${{ github.event_name }}" = "schedule" ] \
-             && docker manifest inspect "$IMG:$VERSION" >/dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Wersja $VERSION juz zbudowana - pomijam."
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "n8n=$V alpine=$ALPINE"
+          echo "alpine=$ALPINE" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
         if: steps.v.outputs.skip == 'false'
@@ -81,7 +112,7 @@ jobs:
                  --platform linux/arm64 \
                  --build-arg N8N_IMAGE="$BASE" \
                  --build-arg N8N_VERSION=${{ steps.v.outputs.version }} \
-                 --build-arg ALPINE_VERSION=${{ steps.v.outputs.alpine }} \
+                 --build-arg ALPINE_VERSION=${{ steps.base.outputs.alpine }} \
                  --label org.opencontainers.image.version=${{ steps.v.outputs.version }} \
                  --cache-from type=gha \
                  --cache-to type=gha,mode=max \
