@@ -46,10 +46,29 @@ jobs:
             DIGEST=$(curl -fsS --retry 3 --retry-delay 10 "$HUB/latest" | jq -r '.digest // empty')
             if [ -z "$DIGEST" ]; then echo "BLAD: brak digestu dla $BASE:latest"; exit 1; fi
 
-            VERSION=$(curl -fsS --retry 3 --retry-delay 10 "$HUB?page_size=100&ordering=last_updated" \
-                      | jq -r --arg d "$DIGEST" '.results[] | select(.digest == $d) | .name' \
-                      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
-            if [ -z "$VERSION" ]; then echo "BLAD: nie znaleziono wersji dla digestu $DIGEST"; exit 1; fi
+            # n8n publikuje teraz ~50 tagow dziennie (v3-nightly, v3-rc, *-pc, *-amd64/arm64),
+            # wiec tag x.y.z dla latest szybko wypada z pierwszej strony. Przegladamy do 10 stron.
+            VERSION=""
+            URL="$HUB?page_size=100&ordering=last_updated"
+            for PAGE in $(seq 1 10); do
+              [ -z "$URL" ] && break
+              RESP=$(curl -fsS --retry 3 --retry-delay 10 "$URL")
+              VERSION=$(printf '%s' "$RESP" \
+                        | jq -r --arg d "$DIGEST" '.results[] | select(.digest == $d) | .name' \
+                        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+              [ -n "$VERSION" ] && { echo "Znaleziono na stronie $PAGE"; break; }
+              URL=$(printf '%s' "$RESP" | jq -r '.next // empty')
+            done
+
+            if [ -z "$VERSION" ]; then
+              if [ "${{ github.event_name }}" = "schedule" ]; then
+                echo "::warning::Nie znaleziono wersji dla digestu $DIGEST w 10 stronach tagow, pomijam ten run"
+                echo "version=" >> "$GITHUB_OUTPUT"
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "BLAD: nie znaleziono wersji dla digestu $DIGEST"; exit 1
+            fi
             echo "Docker Hub latest = $VERSION ($DIGEST)"
           fi
 
